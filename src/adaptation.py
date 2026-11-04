@@ -46,6 +46,44 @@ def make_adaptation_data(dim, seq_len, deltas, tasks_val, tasks_test, n_ctx, n_q
     return dict(W=W, member_delta=np.array(member_delta), member_split=np.array(member_split),
                 Xc=Xc, Fc=Fc, Yc=Yc, Xq=Xq, Fq=Fq, Xtr=Xtr, Ytr=Ytr)
 
+def make_direction_data(dim, seq_len, delta, directions, reps_val, reps_test, n_ctx, n_query, n_train, sigma, seed,
+                        device='cuda'):
+    """Like make_adaptation_data, but for fixed targets w_j = cos(delta) v + sin(delta) e_j (delta in degrees), one per
+    perpendicular coordinate j in directions, each repeated with independent datasets. Datasets are paired across
+    directions: repetition r of a split uses the same inputs and label noise for every j. Members are ordered by
+    split, then direction, then repetition."""
+    gen = torch.Generator(device=device)
+    gen.manual_seed(seed)
+    v = pole(dim, device)
+    reps = {"val": reps_val, "test": reps_test}
+    member_split, member_direction, member_rep, W, base = [], [], [], [], []
+    for split in ("val", "test"):
+        for j in directions:
+            w = np.cos(delta * np.pi / 180) * v
+            w[j] += np.sin(delta * np.pi / 180)
+            W.append(w[None, :].repeat(reps[split], 1))
+            member_split += [split] * reps[split]
+            member_direction += [j] * reps[split]
+            member_rep += list(range(reps[split]))
+            base += list(range(reps[split]) if split == "val" else range(reps_val, reps_val + reps_test))
+    W = torch.cat(W)
+    base = torch.tensor(base, device=device)
+    R = reps_val + reps_test
+
+    def labels(xs, noise):
+        f = torch.einsum('e...d,ed->e...', xs, W)
+        return f, f + sigma * noise
+
+    Xc = torch.randn(R, n_ctx, seq_len, dim, generator=gen, device=device)[base]
+    Fc, Yc = labels(Xc, torch.randn(R, n_ctx, seq_len, generator=gen, device=device)[base])
+    Xq = torch.randn(R, n_query, 1, dim, generator=gen, device=device)[base]
+    Fq, _ = labels(Xq, torch.zeros(1, device=device))
+    Xtr = torch.randn(R, n_train, 1, dim, generator=gen, device=device)[base]
+    _, Ytr = labels(Xtr, torch.randn(R, n_train, 1, generator=gen, device=device)[base])
+    return dict(W=W, member_delta=np.full(len(member_split), float(delta)), member_split=np.array(member_split),
+                member_direction=np.array(member_direction), member_rep=np.array(member_rep),
+                Xc=Xc, Fc=Fc, Yc=Yc, Xq=Xq, Fq=Fq, Xtr=Xtr, Ytr=Ytr)
+
 def stack_params(model, E):
     """Copy a RegressionTransformer's weights into a dict of tensors with a leading dim of E independent
     copies (attention heads concatenated along the output dim), for batched_forward."""

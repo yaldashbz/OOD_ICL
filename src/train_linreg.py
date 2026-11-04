@@ -28,7 +28,7 @@ def get_batch(pretrain_size, batch_size, ws=None, online=False, dim=10, angle=np
 def train(batch_size=128, lr=3e-4, epochs=120, batches_per_epoch=100, device='cuda',
           seq_len=50, d_model=128, n_layer=10, dim=10, noise_std=0, checkpoint_dir="checkpoints/", 
           pretrain_size=2**10, angle=180, lr_milestones=[], gaussianize=False,
-          save_freq=3, output_dir="output/"):
+          save_freq=3, output_dir="output/", task_scales=None):
     """Train a transformer to do in-context linear regression with weight vectors sampled
     from a hyperspherical cap with a given angle.
     Args:
@@ -50,6 +50,9 @@ def train(batch_size=128, lr=3e-4, epochs=120, batches_per_epoch=100, device='cu
             the weight vectors will have norm 1
         save_freq (int): Frequency (in epochs) with which to save model checkpoints.
         output_dir (str): Output directory for saving the model and results.
+        task_scales (array or None): If given, length dim-1 scales for the coordinates perpendicular to the
+            cap's pole; every pretraining task keeps its angle from the pole while its perpendicular part
+            is reweighted (dataset_utils.anisotropize). None keeps the rotationally symmetric cap.
     Returns:
         model (torch.nn.Module): The trained transformer model.
         loss_history (np.ndarray): Array of training loss values over time.
@@ -84,7 +87,9 @@ def train(batch_size=128, lr=3e-4, epochs=120, batches_per_epoch=100, device='cu
     loss_history = [0]*batches_per_epoch*epochs
     test_loss_history = [0]*epochs
 
-    ws = dataset_utils.sample_cone(pretrain_size, dim, angle, gaussianize=gaussianize) 
+    ws = dataset_utils.sample_cone(pretrain_size, dim, angle, gaussianize=gaussianize)
+    if task_scales is not None:
+        ws = dataset_utils.anisotropize(ws, task_scales)
     dmmse = DiscreteMMSE(ws)
 
     for epoch in range(1,epochs+1):

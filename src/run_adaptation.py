@@ -4,7 +4,7 @@ import time
 import numpy as np
 import torch
 from pathlib import Path
-from adaptation import load_pretrained, stack_params, batched_forward, make_adaptation_data
+from adaptation import load_pretrained, stack_params, batched_forward, make_adaptation_data, make_direction_data
 
 #Compares three ways of adapting a pretrained ICL transformer to a downstream task w_target at angle delta
 #from the pretraining pole v, with y = w_target^T x + eps:
@@ -29,17 +29,25 @@ parser.add_argument("--n_ctx", type=int, default=64, help="evaluation contexts p
 parser.add_argument("--n_query", type=int, default=1024, help="evaluation points per task for FT only")
 parser.add_argument("--chunk", type=int, default=32, help="tasks per chunk in the ICL evaluation forward pass")
 parser.add_argument("--data_seed", type=int, default=None, help="defaults to the pretrained model's seed")
+parser.add_argument("--directions", type=int, nargs="+", default=None,
+                    help="evaluate fixed targets cos(delta) v + sin(delta) e_j for these coordinates j (1..dim-1) at the single "
+                         "delta in --deltas, with --tasks_val / --tasks_test paired datasets per direction")
 parser.add_argument("--out", type=str, default=None)
 args = parser.parse_args()
+assert args.directions is None or len(args.deltas) == 1, "--directions takes a single --deltas value"
 
 device = 'cuda'
 model, margs = load_pretrained(args.pretrained, device)
 dim, seq_len = margs['dim'], margs['seq_len']
 data_seed = margs['seed'] if args.data_seed is None else args.data_seed
-#tasks: for each split, for each delta, tasks_split independent w_target; fresh demonstrations shared by ICL and
-#FT+ICL, FT-only query points, and a nested pool of FT training data
-data = make_adaptation_data(dim, seq_len, args.deltas, args.tasks_val, args.tasks_test, args.n_ctx, args.n_query,
-                            max(args.ns), np.sqrt(args.noise_var), data_seed, device)
+#tasks: for each split, for each delta, tasks_split independent w_target (or, with --directions, fixed targets with
+#paired datasets); fresh demonstrations shared by ICL and FT+ICL, FT-only query points, and a nested pool of FT data
+if args.directions is None:
+    data = make_adaptation_data(dim, seq_len, args.deltas, args.tasks_val, args.tasks_test, args.n_ctx, args.n_query,
+                                max(args.ns), np.sqrt(args.noise_var), data_seed, device)
+else:
+    data = make_direction_data(dim, seq_len, args.deltas[0], args.directions, args.tasks_val, args.tasks_test, args.n_ctx,
+                               args.n_query, max(args.ns), np.sqrt(args.noise_var), data_seed, device)
 W, member_delta, member_split = data['W'], data['member_delta'], data['member_split']
 Xc, Fc, Yc, Xq, Fq, Xtr, Ytr = [data[k] for k in ('Xc', 'Fc', 'Yc', 'Xq', 'Fq', 'Xtr', 'Ytr')]
 E = W.shape[0]
@@ -94,9 +102,11 @@ for i, n in enumerate(args.ns):
         print("n={0:5d} lr={1:.0e}: median test R_ft over steps {2}  ({3:.1f} min)".format(
             n, lr, np.array2string(np.median(R_ft[i, j][:, test], axis=1), precision=4), (time.time() - t0) / 60), flush=True)
 
-out = Path(args.out or (args.pretrained.rstrip("/") + "/adaptation_noise{0}.npz".format(args.noise_var)))
+name = "adaptation_noise{0}.npz" if args.directions is None else "adaptation_dirs_delta{1:g}_noise{0}.npz"
+out = Path(args.out or (args.pretrained.rstrip("/") + "/" + name.format(args.noise_var, args.deltas[0])))
+extra = {} if args.directions is None else dict(member_direction=data['member_direction'], member_rep=data['member_rep'])
 np.savez(out, R_icl=R_icl, R_zero=R_zero, R_ft=R_ft, R_ft_icl=R_ft_icl, L_train=L_train,
          member_delta=member_delta, member_split=member_split, W=W.cpu().numpy(),
          ns=np.array(args.ns), lrs=np.array(args.lrs), ckpts=np.array(args.ckpts),
-         phi=margs['angle'], noise_var=args.noise_var, args=json.dumps(vars(args)))
+         phi=margs['angle'], noise_var=args.noise_var, args=json.dumps(vars(args)), **extra)
 print("saved", out, "({0:.1f} min)".format((time.time() - t0) / 60))

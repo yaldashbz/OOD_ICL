@@ -37,6 +37,17 @@ def sample_cone(n, d, max_theta, min_theta=0.0, r=1.0, gaussianize=False, device
 
     return torch.tensor(x, device=device, dtype=torch.float32)
 
+def anisotropize(ws, scales):
+    #Break the rotational symmetry of a cap around its pole (+-e_1, the first coordinate) while keeping every
+    #vector's first coordinate, hence its angle from the pole, and its norm: the perpendicular part is scaled
+    #coordinatewise by scales (length d-1) and rescaled back to its original length.
+    scales = torch.as_tensor(np.asarray(scales), dtype=ws.dtype, device=ws.device)
+    z = ws[:, 1:]
+    zs = z * scales
+    zs_norm = zs.norm(dim=1, keepdim=True)
+    out = torch.where(zs_norm > 1e-12, zs * z.norm(dim=1, keepdim=True) / zs_norm.clamp_min(1e-12), z)
+    return torch.cat([ws[:, :1], out], dim=1)
+
 def gen_linreg_data(seed,batch_size=64,dim=10,n_samples=50,mean=0,std=1, 
                     ws=None, device='cuda',noise_std=None,
                     sequence_transform=None, dim2=-1,norm=False,max_angle=None,min_angle=None):
